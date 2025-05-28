@@ -41,8 +41,8 @@
             .hash = "zig_wayland-0.3.0-dev-r73zYTzIAQAOXkH-9fjwrtXiGA7nDbOOkm-a_WcnQbQE",
         },
         .vulkan = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig#57d587c8a4b6ff5493613b1cf0c64ce34461696e",
-            .hash = "vulkan-0.0.0-r7Ytx5GAAwBIBpjW4Ipd81FiM24t7UxlVomrGkubzW3v",
+            .url = "git+https://github.com/snektron/vulkan-zig#9b4090c852760ce3210562f62ffaf301479c38ba",
+            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
         },
     },
     .paths = .{

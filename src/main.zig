@@ -34,7 +34,19 @@ pub fn main() !void {
 
     const gpa = debug_allocator.allocator();
 
-    var renderer: Renderer = try .init(gpa, display, wl_surface);
+    const instance_handle, const instance_wrapper = try setupInstance();
+    const instance: vk.InstanceProxy = .init(instance_handle, &instance_wrapper);
+
+    const physical_device, const device_handle, const device_wrapper = try setupDevice(gpa, instance);
+
+    var renderer: Renderer = try .init(
+        instance,
+        device_handle,
+        &device_wrapper,
+        physical_device,
+        display,
+        wl_surface,
+    );
     defer renderer.deinit(gpa);
 
     var state: XdgSurfaceState = .{
@@ -138,12 +150,75 @@ const client = @import("wayland").client;
 const mem = std.mem;
 const std = @import("std");
 
+fn setupInstance() !struct { vk.Instance, vk.InstanceWrapper } {
+    const instance_handle = blk: {
+        const base: vk.BaseWrapper = .load(vkGetInstanceProcAddr);
+        const layers: [1][*:0]const u8 = .{"VK_LAYER_KHRONOS_validation"};
+        const instance_extensions: [2][*:0]const u8 = .{ vk.extensions.khr_surface.name, vk.extensions.khr_wayland_surface.name };
+
+        break :blk try base.createInstance(&.{
+            .p_application_info = &.{
+                .application_version = 1,
+                .engine_version = 1,
+                .api_version = @bitCast(vk.API_VERSION_1_3),
+            },
+            .enabled_layer_count = layers.len,
+            .pp_enabled_layer_names = &layers,
+            .enabled_extension_count = instance_extensions.len,
+            .pp_enabled_extension_names = &instance_extensions,
+        }, null);
+    };
+
+    const instance_wrapper: vk.InstanceWrapper = .load(instance_handle, vkGetInstanceProcAddr);
+    return .{ instance_handle, instance_wrapper };
+}
+
+fn setupDevice(gpa: mem.Allocator, instance: vk.InstanceProxy) !struct { vk.PhysicalDevice, vk.Device, vk.DeviceWrapper } {
+    const physical_devices = try instance.enumeratePhysicalDevicesAlloc(gpa);
+    defer gpa.free(physical_devices);
+
+    debug.print("physical devices: {any}\n", .{physical_devices});
+
+    const physical_device = physical_devices[0];
+    const queue_families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, gpa);
+    defer gpa.free(queue_families);
+
+    debug.print("queue families: {any}\n", .{queue_families});
+
+    const queue_family = 0;
+    const queue_priorities: [1]f32 = .{1};
+    const queue_create_infos: [1]vk.DeviceQueueCreateInfo = .{
+        .{
+            .queue_family_index = queue_family,
+            .queue_count = queue_priorities.len,
+            .p_queue_priorities = &queue_priorities,
+        },
+    };
+
+    const device_handle = blk: {
+        const device_extensions: [1][*:0]const u8 = .{vk.extensions.khr_swapchain.name};
+        const features: vk.PhysicalDeviceVulkan13Features = .{
+            .synchronization_2 = vk.TRUE,
+            .dynamic_rendering = vk.TRUE,
+        };
+
+        break :blk try instance.createDevice(physical_device, &.{
+            .p_next = &features,
+            .queue_create_info_count = queue_create_infos.len,
+            .p_queue_create_infos = &queue_create_infos,
+            .enabled_extension_count = device_extensions.len,
+            .pp_enabled_extension_names = &device_extensions,
+        }, null);
+    };
+
+    const device_wrapper: vk.DeviceWrapper = .load(device_handle, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+    return .{ physical_device, device_handle, device_wrapper };
+}
+
 const Renderer = struct {
-    instance: vk.Instance,
-    iw: InstanceWrapper,
+    instance: vk.InstanceProxy,
     physical_device: vk.PhysicalDevice,
-    device: vk.Device,
-    dw: DeviceWrapper,
+    device: vk.DeviceProxy,
     queue: vk.Queue,
     surface: vk.SurfaceKHR,
     frame: Frame,
@@ -160,27 +235,27 @@ const Renderer = struct {
         submitted: vk.Semaphore,
         rendered: vk.Fence,
 
-        fn init(dw: DeviceWrapper, device: vk.Device, queue_family_index: u32) !Frame {
-            const command_pool = try dw.createCommandPool(device, &.{
+        fn init(device: vk.DeviceProxy, queue_family_index: u32) !Frame {
+            const command_pool = try device.createCommandPool(&.{
                 .flags = .{ .reset_command_buffer_bit = true },
                 .queue_family_index = queue_family_index,
             }, null);
-            errdefer dw.destroyCommandPool(device, command_pool, null);
+            errdefer device.destroyCommandPool(command_pool, null);
 
             var command_buffers: [1]vk.CommandBuffer = undefined;
-            try dw.allocateCommandBuffers(device, &.{
+            try device.allocateCommandBuffers(&.{
                 .command_pool = command_pool,
                 .level = .primary,
                 .command_buffer_count = command_buffers.len,
             }, &command_buffers);
 
-            const image_acquired = try dw.createSemaphore(device, &.{}, null);
-            errdefer dw.destroySemaphore(device, image_acquired, null);
+            const image_acquired = try device.createSemaphore(&.{}, null);
+            errdefer device.destroySemaphore(image_acquired, null);
 
-            const submitted = try dw.createSemaphore(device, &.{}, null);
-            errdefer dw.destroySemaphore(device, submitted, null);
+            const submitted = try device.createSemaphore(&.{}, null);
+            errdefer device.destroySemaphore(submitted, null);
 
-            const rendered = try dw.createFence(device, &.{}, null);
+            const rendered = try device.createFence(&.{}, null);
 
             return .{
                 .image_acquired = image_acquired,
@@ -191,10 +266,10 @@ const Renderer = struct {
             };
         }
 
-        fn deinit(self: Frame, dw: DeviceWrapper, device: vk.Device) void {
-            dw.destroySemaphore(device, self.submitted, null);
-            dw.destroySemaphore(device, self.image_acquired, null);
-            dw.destroyCommandPool(device, self.command_pool, null);
+        fn deinit(self: Frame, device: vk.DeviceProxy) void {
+            device.destroySemaphore(self.submitted, null);
+            device.destroySemaphore(self.image_acquired, null);
+            device.destroyCommandPool(self.command_pool, null);
         }
     };
 
@@ -208,84 +283,32 @@ const Renderer = struct {
     };
 
     fn init(
-        gpa: mem.Allocator,
+        instance: vk.InstanceProxy,
+        device_handle: vk.Device,
+        device_wrapper: *const vk.DeviceWrapper,
+        physical_device: vk.PhysicalDevice,
         display: *wl.Display,
         wl_surface: *wl.Surface,
     ) !Renderer {
-        const base = try vk.BaseWrapper(&.{.{ .base_commands = .{ .createInstance = true } }}).load(vkGetInstanceProcAddr);
+        const device: vk.DeviceProxy = .init(device_handle, device_wrapper);
+        errdefer device.destroyDevice(null);
 
-        const instance = blk: {
-            const layers: [1][*:0]const u8 = .{"VK_LAYER_KHRONOS_validation"};
-            const extensions: [2][*:0]const u8 = .{ vk.extensions.khr_surface.name, vk.extensions.khr_wayland_surface.name };
+        const atlas: Atlas = try .init(undefined, 5);
+        _ = atlas;
 
-            break :blk try base.createInstance(&.{
-                .p_application_info = &.{
-                    .application_version = 1,
-                    .engine_version = 1,
-                    .api_version = @bitCast(vk.API_VERSION_1_3),
-                },
-                .enabled_layer_count = layers.len,
-                .pp_enabled_layer_names = &layers,
-                .enabled_extension_count = extensions.len,
-                .pp_enabled_extension_names = &extensions,
-            }, null);
-        };
-
-        const iw: InstanceWrapper = try .load(instance, vkGetInstanceProcAddr);
-        errdefer iw.destroyInstance(instance, null);
-
-        const physical_devices = try iw.enumeratePhysicalDevicesAlloc(instance, gpa);
-        defer gpa.free(physical_devices);
-
-        debug.print("physical devices: {any}\n", .{physical_devices});
-
-        const physical_device = physical_devices[0];
-        const queue_families = try iw.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, gpa);
-        defer gpa.free(queue_families);
-
-        debug.print("queue families: {any}\n", .{queue_families});
-
-        const queue_family = 0;
-        const queue_priorities: [1]f32 = .{1};
-        const queue_create_infos: [1]vk.DeviceQueueCreateInfo = .{
-            .{
-                .queue_family_index = queue_family,
-                .queue_count = queue_priorities.len,
-                .p_queue_priorities = &queue_priorities,
-            },
-        };
-
-        const device = blk: {
-            const extensions: [1][*:0]const u8 = .{vk.extensions.khr_swapchain.name};
-            const features: vk.PhysicalDeviceVulkan13Features = .{
-                .synchronization_2 = vk.TRUE,
-                .dynamic_rendering = vk.TRUE,
-            };
-
-            break :blk try iw.createDevice(physical_device, &.{
-                .p_next = &features,
-                .queue_create_info_count = queue_create_infos.len,
-                .p_queue_create_infos = &queue_create_infos,
-                .enabled_extension_count = extensions.len,
-                .pp_enabled_extension_names = &extensions,
-            }, null);
-        };
-
-        const dw: DeviceWrapper = try .load(device, iw.dispatch.vkGetDeviceProcAddr);
-        errdefer dw.destroyDevice(device, null);
-
-        const surface = try iw.createWaylandSurfaceKHR(instance, &.{
+        const surface = try instance.createWaylandSurfaceKHR(&.{
             .display = @ptrCast(display),
             .surface = @ptrCast(wl_surface),
         }, null);
-        errdefer iw.destroySurfaceKHR(instance, surface, null);
+        errdefer instance.destroySurfaceKHR(surface, null);
 
-        const frame: Frame = try .init(dw, device, queue_family);
-        errdefer frame.deinit(dw, device);
+        const queue_family = 0;
+        const frame: Frame = try .init(device, queue_family);
+        errdefer frame.deinit(device);
 
-        debug.assert(iw.getPhysicalDeviceWaylandPresentationSupportKHR(physical_device, queue_family, @ptrCast(display)) > 0);
+        debug.assert(instance.getPhysicalDeviceWaylandPresentationSupportKHR(physical_device, queue_family, @ptrCast(display)) > 0);
 
-        const queue = dw.getDeviceQueue(device, queue_family, 0);
+        const queue = device.getDeviceQueue(queue_family, 0);
 
         const layout, const pipeline = pipeline: {
             const attachment_formats: [1]vk.Format = .{format};
@@ -300,22 +323,22 @@ const Renderer = struct {
             const vertex_module = blk: {
                 const vertex_bytecode align(@alignOf(u32)) = @embedFile("vertex").*;
 
-                break :blk try dw.createShaderModule(device, &.{
+                break :blk try device.createShaderModule(&.{
                     .code_size = vertex_bytecode.len,
                     .p_code = @ptrCast(&vertex_bytecode),
                 }, null);
             };
-            defer dw.destroyShaderModule(device, vertex_module, null);
+            defer device.destroyShaderModule(vertex_module, null);
 
             const fragment_module = blk: {
                 const fragment_bytecode align(@alignOf(u32)) = @embedFile("fragment").*;
 
-                break :blk try dw.createShaderModule(device, &.{
+                break :blk try device.createShaderModule(&.{
                     .code_size = fragment_bytecode.len,
                     .p_code = @ptrCast(&fragment_bytecode),
                 }, null);
             };
-            defer dw.destroyShaderModule(device, fragment_module, null);
+            defer device.destroyShaderModule(fragment_module, null);
 
             const stages: [2]vk.PipelineShaderStageCreateInfo = .{ .{
                 .stage = .{ .vertex_bit = true },
@@ -390,8 +413,8 @@ const Renderer = struct {
                 .blend_constants = .{ 0, 0, 0, 0 },
             };
 
-            const layout = try dw.createPipelineLayout(device, &.{}, null);
-            errdefer dw.destroyPipelineLayout(device, layout, null);
+            const layout = try device.createPipelineLayout(&.{}, null);
+            errdefer device.destroyPipelineLayout(layout, null);
 
             const create_infos: [1]vk.GraphicsPipelineCreateInfo = .{
                 .{
@@ -411,19 +434,17 @@ const Renderer = struct {
                 },
             };
             var pipelines: [1]vk.Pipeline = undefined;
-            _ = try dw.createGraphicsPipelines(device, .null_handle, create_infos.len, &create_infos, null, &pipelines);
+            _ = try device.createGraphicsPipelines(.null_handle, create_infos.len, &create_infos, null, &pipelines);
 
             break :pipeline .{ layout, pipelines[0] };
         };
-        errdefer dw.destroyPipelineLayout(device, layout, null);
-        errdefer dw.destroyPipeline(device, pipeline, null);
+        errdefer device.destroyPipelineLayout(layout, null);
+        errdefer device.destroyPipeline(pipeline, null);
 
         return .{
             .instance = instance,
-            .iw = iw,
             .physical_device = physical_device,
             .device = device,
-            .dw = dw,
             .queue = queue,
             .surface = surface,
             .frame = frame,
@@ -436,22 +457,22 @@ const Renderer = struct {
     }
 
     fn deinit(self: *Renderer, gpa: mem.Allocator) void {
-        self.dw.destroyPipeline(self.device, self.pipeline, null);
-        self.dw.destroyPipelineLayout(self.device, self.pipeline_layout, null);
+        self.device.destroyPipeline(self.pipeline, null);
+        self.device.destroyPipelineLayout(self.pipeline_layout, null);
 
         for (self.views.items) |view| {
-            self.dw.destroyImageView(self.device, view, null);
+            self.device.destroyImageView(view, null);
         }
 
         self.views.deinit(gpa);
         self.images.deinit(gpa);
 
-        self.frame.deinit(self.dw, self.device);
+        self.frame.deinit(self.device);
 
-        self.dw.destroySwapchainKHR(self.device, self.swapchain, null);
-        self.iw.destroySurfaceKHR(self.instance, self.surface, null);
-        self.dw.destroyDevice(self.device, null);
-        self.iw.destroyInstance(self.instance, null);
+        self.device.destroySwapchainKHR(self.swapchain, null);
+        self.instance.destroySurfaceKHR(self.surface, null);
+        self.device.destroyDevice(null);
+        self.instance.destroyInstance(null);
     }
 
     fn resize(
@@ -460,7 +481,7 @@ const Renderer = struct {
         width: u32,
         height: u32,
     ) !void {
-        const capabilities = try self.iw.getPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface);
+        const capabilities = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface);
         debug.print("capabilities: {}\n", .{capabilities});
 
         const image_count = blk: {
@@ -468,17 +489,17 @@ const Renderer = struct {
             break :blk if (capabilities.max_image_count == 0) image_count else @min(image_count, capabilities.max_image_count);
         };
 
-        const formats = try self.iw.getPhysicalDeviceSurfaceFormatsAllocKHR(self.physical_device, self.surface, gpa);
+        const formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.physical_device, self.surface, gpa);
         defer gpa.free(formats);
 
         debug.print("formats: {any}\n", .{formats});
 
-        const present_modes = try self.iw.getPhysicalDeviceSurfacePresentModesAllocKHR(self.physical_device, self.surface, gpa);
+        const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.physical_device, self.surface, gpa);
         defer gpa.free(present_modes);
 
         debug.print("present_modes: {any}\n", .{present_modes});
 
-        const swapchain = try self.dw.createSwapchainKHR(self.device, &.{
+        const swapchain = try self.device.createSwapchainKHR(&.{
             .surface = self.surface,
             .min_image_count = image_count,
             .image_format = format,
@@ -496,22 +517,22 @@ const Renderer = struct {
             .clipped = vk.TRUE,
             .old_swapchain = self.swapchain,
         }, null);
-        errdefer self.dw.destroySwapchainKHR(self.device, swapchain, null);
+        errdefer self.device.destroySwapchainKHR(swapchain, null);
 
         var images_len: u32 = undefined;
-        debug.assert(try self.dw.getSwapchainImagesKHR(self.device, swapchain, &images_len, null) == .success);
+        debug.assert(try self.device.getSwapchainImagesKHR(swapchain, &images_len, null) == .success);
         try self.images.resize(gpa, images_len);
-        debug.assert(try self.dw.getSwapchainImagesKHR(self.device, swapchain, &images_len, self.images.items[0..images_len].ptr) == .success);
+        debug.assert(try self.device.getSwapchainImagesKHR(swapchain, &images_len, self.images.items[0..images_len].ptr) == .success);
         debug.assert(self.images.items.len == images_len);
 
         try self.views.ensureTotalCapacity(gpa, images_len);
 
         while (self.views.pop()) |view| {
-            self.dw.destroyImageView(self.device, view, null);
+            self.device.destroyImageView(view, null);
         }
 
         for (self.images.items) |image| {
-            self.views.appendAssumeCapacity(try self.dw.createImageView(self.device, &.{
+            self.views.appendAssumeCapacity(try self.device.createImageView(&.{
                 .image = image,
                 .view_type = .@"2d",
                 .format = format,
@@ -534,12 +555,12 @@ const Renderer = struct {
         debug.assert(self.swapchain != .null_handle);
         debug.assert(self.images.items.len > 0);
 
-        const image_index = (try self.dw.acquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.frame.image_acquired, .null_handle)).image_index;
+        const image_index = (try self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.frame.image_acquired, .null_handle)).image_index;
         const command_buffer = self.frame.command_buffer;
 
         {
-            try self.dw.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
-            defer self.dw.endCommandBuffer(command_buffer) catch {};
+            try self.device.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+            defer self.device.endCommandBuffer(command_buffer) catch {};
 
             {
                 const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
@@ -555,7 +576,7 @@ const Renderer = struct {
                         .subresource_range = subresource_range,
                     },
                 };
-                self.dw.cmdPipelineBarrier2(command_buffer, &.{
+                self.device.cmdPipelineBarrier2(command_buffer, &.{
                     .image_memory_barrier_count = image_barriers.len,
                     .p_image_memory_barriers = &image_barriers,
                 });
@@ -575,7 +596,7 @@ const Renderer = struct {
                         },
                     },
                 };
-                self.dw.cmdBeginRendering(command_buffer, &.{
+                self.device.cmdBeginRendering(command_buffer, &.{
                     .render_area = .{
                         .offset = .{ .x = 0, .y = 0 },
                         .extent = .{ .width = width, .height = height },
@@ -585,9 +606,9 @@ const Renderer = struct {
                     .color_attachment_count = color_attachments.len,
                     .p_color_attachments = &color_attachments,
                 });
-                defer self.dw.cmdEndRendering(command_buffer);
+                defer self.device.cmdEndRendering(command_buffer);
 
-                self.dw.cmdBindPipeline(command_buffer, .graphics, self.pipeline);
+                self.device.cmdBindPipeline(command_buffer, .graphics, self.pipeline);
 
                 const viewports: [1]vk.Viewport = .{
                     .{
@@ -599,7 +620,7 @@ const Renderer = struct {
                         .max_depth = 1,
                     },
                 };
-                self.dw.cmdSetViewport(command_buffer, 0, viewports.len, &viewports);
+                self.device.cmdSetViewport(command_buffer, 0, viewports.len, &viewports);
 
                 const scissors: [1]vk.Rect2D = .{
                     .{
@@ -613,9 +634,9 @@ const Renderer = struct {
                         },
                     },
                 };
-                self.dw.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
+                self.device.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
 
-                self.dw.cmdDraw(command_buffer, 3, 1, 0, 0);
+                self.device.cmdDraw(command_buffer, 3, 1, 0, 0);
             }
 
             const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
@@ -630,7 +651,7 @@ const Renderer = struct {
                     .subresource_range = subresource_range,
                 },
             };
-            self.dw.cmdPipelineBarrier2(command_buffer, &.{
+            self.device.cmdPipelineBarrier2(command_buffer, &.{
                 .image_memory_barrier_count = image_barriers.len,
                 .p_image_memory_barriers = &image_barriers,
             });
@@ -665,12 +686,12 @@ const Renderer = struct {
                 .p_signal_semaphore_infos = &signal_semaphores,
             },
         };
-        try self.dw.queueSubmit2(self.queue, submits.len, &submits, self.frame.rendered);
+        try self.device.queueSubmit2(self.queue, submits.len, &submits, self.frame.rendered);
 
         const semaphores: [1]vk.Semaphore = .{self.frame.submitted};
         const swapchains: [1]vk.SwapchainKHR = .{self.swapchain};
         const images: [1]u32 = .{image_index};
-        _ = try self.dw.queuePresentKHR(self.queue, &.{
+        _ = try self.device.queuePresentKHR(self.queue, &.{
             .wait_semaphore_count = semaphores.len,
             .p_wait_semaphores = &semaphores,
             .swapchain_count = swapchains.len,
@@ -679,71 +700,16 @@ const Renderer = struct {
         });
 
         const fences: [1]vk.Fence = .{self.frame.rendered};
-        _ = try self.dw.waitForFences(self.device, fences.len, &fences, vk.TRUE, std.math.maxInt(u64));
-        try self.dw.resetFences(self.device, fences.len, &fences);
+        _ = try self.device.waitForFences(fences.len, &fences, vk.TRUE, std.math.maxInt(u64));
+        try self.device.resetFences(fences.len, &fences);
     }
 };
-
-const InstanceWrapper = vk.InstanceWrapper(
-    &.{
-        .{
-            .instance_commands = .{
-                .destroyInstance = true,
-                .enumeratePhysicalDevices = true,
-                .getPhysicalDeviceQueueFamilyProperties = true,
-                .createDevice = true,
-                .getDeviceProcAddr = true,
-                .createWaylandSurfaceKHR = true,
-                .destroySurfaceKHR = true,
-                .getPhysicalDeviceWaylandPresentationSupportKHR = true,
-                .getPhysicalDeviceSurfaceCapabilitiesKHR = true,
-                .getPhysicalDeviceSurfaceFormatsKHR = true,
-                .getPhysicalDeviceSurfacePresentModesKHR = true,
-            },
-        },
-    },
-);
-
-const DeviceWrapper = vk.DeviceWrapper(&.{.{ .device_commands = .{
-    .destroyDevice = true,
-    .getDeviceQueue = true,
-    .createSwapchainKHR = true,
-    .destroySwapchainKHR = true,
-    .getSwapchainImagesKHR = true,
-    .createImageView = true,
-    .destroyImageView = true,
-    .createShaderModule = true,
-    .destroyShaderModule = true,
-    .createPipelineLayout = true,
-    .destroyPipelineLayout = true,
-    .createGraphicsPipelines = true,
-    .destroyPipeline = true,
-    .createCommandPool = true,
-    .destroyCommandPool = true,
-    .allocateCommandBuffers = true,
-    .createSemaphore = true,
-    .createFence = true,
-    .destroySemaphore = true,
-    .acquireNextImageKHR = true,
-    .beginCommandBuffer = true,
-    .endCommandBuffer = true,
-    .cmdPipelineBarrier2 = true,
-    .cmdBeginRendering = true,
-    .cmdEndRendering = true,
-    .cmdBindPipeline = true,
-    .cmdDraw = true,
-    .cmdSetViewport = true,
-    .cmdSetScissor = true,
-    .queueSubmit2 = true,
-    .queuePresentKHR = true,
-    .waitForFences = true,
-    .resetFences = true,
-} }});
 
 const debug = std.debug;
 
 const vk = @import("vulkan");
 extern "vulkan" fn vkGetInstanceProcAddr(instance: vk.Instance, name: [*:0]const u8) vk.PfnVoidFunction;
+const Atlas = @import("renderer/Atlas.zig");
 
 comptime {
     std.testing.refAllDeclsRecursive(@import("renderer/Atlas.zig"));
