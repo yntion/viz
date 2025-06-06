@@ -38,6 +38,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .link_libcpp = true,
+    });
+
+    viz.addIncludePath(b.path("thirdparty/vma"));
+
+    viz.addCSourceFile(.{
+        .file = b.path("src/Renderer/vma_implementation.cpp"),
     });
 
     const scanner = @import("zig_wayland").Scanner.create(b, .{});

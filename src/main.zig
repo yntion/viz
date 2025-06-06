@@ -208,6 +208,9 @@ fn setupDevice(gpa: mem.Allocator, instance: vk.InstanceProxy) !struct { vk.Phys
             .p_queue_create_infos = &queue_create_infos,
             .enabled_extension_count = device_extensions.len,
             .pp_enabled_extension_names = &device_extensions,
+            .p_enabled_features = &.{
+                .sampler_anisotropy = vk.TRUE,
+            },
         }, null);
     };
 
@@ -218,10 +221,13 @@ fn setupDevice(gpa: mem.Allocator, instance: vk.InstanceProxy) !struct { vk.Phys
 const Renderer = struct {
     instance: vk.InstanceProxy,
     physical_device: vk.PhysicalDevice,
+    vma: c.VmaAllocator,
+    atlas: Atlas,
     device: vk.DeviceProxy,
     queue: vk.Queue,
     surface: vk.SurfaceKHR,
     frame: Frame,
+    descriptor_set: vk.DescriptorSet,
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
     swapchain: vk.SwapchainKHR,
@@ -293,8 +299,49 @@ const Renderer = struct {
         const device: vk.DeviceProxy = .init(device_handle, device_wrapper);
         errdefer device.destroyDevice(null);
 
-        const atlas: Atlas = try .init(undefined, 5);
-        _ = atlas;
+        var vma: c.VmaAllocator = undefined;
+        const res = c.vmaCreateAllocator(&.{
+            .physicalDevice = @ptrFromInt(@as(usize, @intFromEnum(physical_device))),
+            .device = @ptrFromInt(@as(usize, @intFromEnum(device_handle))),
+            .instance = @ptrFromInt(@as(usize, @intFromEnum(instance.handle))),
+            .vulkanApiVersion = @bitCast(vk.API_VERSION_1_3),
+        }, &vma);
+        debug.print("vmaCreateAllocator: {}\n", .{@as(vk.Result, @enumFromInt(res))});
+        errdefer c.vmaDestroyAllocator(vma);
+
+        const atlas: Atlas = try .init(vma, 5);
+        const atlas_image_view = try device.createImageView(&.{
+            .image = atlas.image,
+            .view_type = .@"2d",
+            .format = .r8_srgb,
+            .components = .{
+                .r = .identity,
+                .g = .identity,
+                .b = .identity,
+                .a = .identity,
+            },
+            .subresource_range = subresource_range,
+        }, null);
+
+        const physical_device_properties = instance.getPhysicalDeviceProperties(physical_device);
+        const sampler = try device.createSampler(&.{
+            .mag_filter = .linear,
+            .min_filter = .linear,
+            .mipmap_mode = .linear,
+            .address_mode_u = .repeat,
+            .address_mode_v = .repeat,
+            .address_mode_w = .repeat,
+            .mip_lod_bias = 0,
+            .anisotropy_enable = vk.TRUE,
+            .max_anisotropy = physical_device_properties.limits.max_sampler_anisotropy,
+            .compare_enable = vk.FALSE,
+            .compare_op = .never,
+            .min_lod = 0,
+            .max_lod = 0,
+            .border_color = .int_opaque_black,
+            .unnormalized_coordinates = vk.FALSE,
+        }, null);
+        errdefer device.destroySampler(sampler, null);
 
         const surface = try instance.createWaylandSurfaceKHR(&.{
             .display = @ptrCast(display),
@@ -310,7 +357,7 @@ const Renderer = struct {
 
         const queue = device.getDeviceQueue(queue_family, 0);
 
-        const layout, const pipeline = pipeline: {
+        const descriptor_set_layout, const descriptor_set, const pipeline_layout, const pipeline = pipeline: {
             const attachment_formats: [1]vk.Format = .{format};
             const rendering: vk.PipelineRenderingCreateInfo = .{
                 .view_mask = 0,
@@ -413,8 +460,79 @@ const Renderer = struct {
                 .blend_constants = .{ 0, 0, 0, 0 },
             };
 
-            const layout = try device.createPipelineLayout(&.{}, null);
-            errdefer device.destroyPipelineLayout(layout, null);
+            const bindings: [1]vk.DescriptorSetLayoutBinding = .{
+                .{
+                    .binding = 0,
+                    .descriptor_type = .combined_image_sampler,
+                    .descriptor_count = 1,
+                    .stage_flags = .{ .fragment_bit = true },
+                },
+            };
+            const descriptor_set_layouts: [1]vk.DescriptorSetLayout = .{
+                try device.createDescriptorSetLayout(
+                    &.{
+                        .binding_count = bindings.len,
+                        .p_bindings = &bindings,
+                    },
+                    null,
+                ),
+            };
+            errdefer device.destroyDescriptorSetLayout(descriptor_set_layouts[0], null);
+
+            const descriptor_pool = blk: {
+                const sizes: [1]vk.DescriptorPoolSize = .{
+                    .{
+                        .type = .combined_image_sampler,
+                        .descriptor_count = 1,
+                    },
+                };
+
+                break :blk try device.createDescriptorPool(
+                    &.{
+                        .pool_size_count = sizes.len,
+                        .p_pool_sizes = &sizes,
+                        .max_sets = 1,
+                    },
+                    null,
+                );
+            };
+            errdefer device.destroyDescriptorPool(descriptor_pool, null);
+
+            var descriptor_sets: [1]vk.DescriptorSet = undefined;
+            try device.allocateDescriptorSets(&.{
+                .descriptor_pool = descriptor_pool,
+                .descriptor_set_count = descriptor_set_layouts.len,
+                .p_set_layouts = &descriptor_set_layouts,
+            }, &descriptor_sets);
+
+            const descriptor_writes: [1]vk.WriteDescriptorSet = .{
+                .{
+                    .dst_set = descriptor_sets[0],
+                    .dst_binding = 0,
+                    .dst_array_element = 0,
+                    .descriptor_count = 1,
+                    .descriptor_type = .combined_image_sampler,
+                    .p_image_info = &.{
+                        .{
+                            .sampler = sampler,
+                            .image_view = atlas_image_view,
+                            .image_layout = .shader_read_only_optimal,
+                        },
+                    },
+                    .p_buffer_info = &.{},
+                    .p_texel_buffer_view = &.{},
+                },
+            };
+            device.updateDescriptorSets(descriptor_writes.len, &descriptor_writes, 0, null);
+
+            const pipeline_layout = try device.createPipelineLayout(
+                &.{
+                    .set_layout_count = descriptor_set_layouts.len,
+                    .p_set_layouts = &descriptor_set_layouts,
+                },
+                null,
+            );
+            errdefer device.destroyPipelineLayout(pipeline_layout, null);
 
             const create_infos: [1]vk.GraphicsPipelineCreateInfo = .{
                 .{
@@ -428,7 +546,7 @@ const Renderer = struct {
                     .p_multisample_state = &multisample,
                     .p_color_blend_state = &color_blend,
                     .p_dynamic_state = &dynamic_state,
-                    .layout = layout,
+                    .layout = pipeline_layout,
                     .subpass = 0,
                     .base_pipeline_index = 0,
                 },
@@ -436,19 +554,24 @@ const Renderer = struct {
             var pipelines: [1]vk.Pipeline = undefined;
             _ = try device.createGraphicsPipelines(.null_handle, create_infos.len, &create_infos, null, &pipelines);
 
-            break :pipeline .{ layout, pipelines[0] };
+            break :pipeline .{ descriptor_set_layouts[0], descriptor_sets[0], pipeline_layout, pipelines[0] };
         };
-        errdefer device.destroyPipelineLayout(layout, null);
+        errdefer device.destroyDescriptorSetLayout(descriptor_set_layout, null);
+        errdefer device.destroyDescriptorSet(descriptor_set, null);
+        errdefer device.destroyPipelineLayout(pipeline_layout, null);
         errdefer device.destroyPipeline(pipeline, null);
 
         return .{
             .instance = instance,
             .physical_device = physical_device,
+            .vma = vma,
+            .atlas = atlas,
             .device = device,
             .queue = queue,
             .surface = surface,
             .frame = frame,
-            .pipeline_layout = layout,
+            .descriptor_set = descriptor_set,
+            .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
             .swapchain = .null_handle,
             .images = .empty,
@@ -471,6 +594,7 @@ const Renderer = struct {
 
         self.device.destroySwapchainKHR(self.swapchain, null);
         self.instance.destroySurfaceKHR(self.surface, null);
+        c.vmaDestroyAllocator(self.vma);
         self.device.destroyDevice(null);
         self.instance.destroyInstance(null);
     }
@@ -551,21 +675,37 @@ const Renderer = struct {
         self.swapchain = swapchain;
     }
 
-    fn render(self: Renderer, width: u32, height: u32) !void {
+    fn render(self: *Renderer, width: u32, height: u32) !void {
         debug.assert(self.swapchain != .null_handle);
         debug.assert(self.images.items.len > 0);
 
         const image_index = (try self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.frame.image_acquired, .null_handle)).image_index;
         const command_buffer = self.frame.command_buffer;
 
+        _ = try self.atlas.insert(&[_]u8{0x7f} ** (8 * 8), 8, 8);
+
         {
             try self.device.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
             defer self.device.endCommandBuffer(command_buffer) catch {};
 
             {
-                const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
+                const atlas_image_transfer: vk.ImageMemoryBarrier2 = .{
+                    .src_stage_mask = .{},
+                    .src_access_mask = .{},
+                    .dst_stage_mask = .{ .copy_bit = true },
+                    .dst_access_mask = .{ .transfer_write_bit = true },
+                    .old_layout = .undefined,
+                    .new_layout = .transfer_dst_optimal,
+                    .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .image = self.atlas.image,
+                    .subresource_range = subresource_range,
+                };
+
+                const image_barriers: [2]vk.ImageMemoryBarrier2 = .{
                     .{
-                        .src_stage_mask = .{ .color_attachment_output_bit = true },
+                        .src_stage_mask = .{},
+                        .src_access_mask = .{},
                         .dst_stage_mask = .{ .color_attachment_output_bit = true },
                         .dst_access_mask = .{ .color_attachment_write_bit = true },
                         .old_layout = .undefined,
@@ -575,7 +715,68 @@ const Renderer = struct {
                         .image = self.images.items[image_index],
                         .subresource_range = subresource_range,
                     },
+                    atlas_image_transfer,
                 };
+
+                self.device.cmdPipelineBarrier2(command_buffer, &.{
+                    .image_memory_barrier_count = image_barriers.len,
+                    .p_image_memory_barriers = &image_barriers,
+                });
+            }
+
+            {
+                const regions: [1]vk.BufferImageCopy = .{
+                    .{
+                        .buffer_offset = 0,
+                        .buffer_row_length = 0,
+                        .buffer_image_height = 0,
+                        .image_subresource = .{
+                            .aspect_mask = .{ .color_bit = true },
+                            .mip_level = 0,
+                            .base_array_layer = 0,
+                            .layer_count = 1,
+                        },
+                        .image_offset = .{
+                            .x = 0,
+                            .y = 0,
+                            .z = 0,
+                        },
+                        .image_extent = .{
+                            .width = self.atlas.width,
+                            .height = self.atlas.height,
+                            .depth = 1,
+                        },
+                    },
+                };
+
+                self.device.cmdCopyBufferToImage(
+                    command_buffer,
+                    self.atlas.buffer,
+                    self.atlas.image,
+                    .transfer_dst_optimal,
+                    regions.len,
+                    &regions,
+                );
+
+                const atlas_image_shader_read: vk.ImageMemoryBarrier2 = .{
+                    .src_stage_mask = .{
+                        .copy_bit = true,
+                    },
+                    .src_access_mask = .{ .transfer_write_bit = true },
+                    .dst_stage_mask = .{ .fragment_shader_bit = true },
+                    .dst_access_mask = .{ .shader_sampled_read_bit = true },
+                    .old_layout = .transfer_dst_optimal,
+                    .new_layout = .shader_read_only_optimal,
+                    .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .image = self.atlas.image,
+                    .subresource_range = subresource_range,
+                };
+
+                const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
+                    atlas_image_shader_read,
+                };
+
                 self.device.cmdPipelineBarrier2(command_buffer, &.{
                     .image_memory_barrier_count = image_barriers.len,
                     .p_image_memory_barriers = &image_barriers,
@@ -636,13 +837,29 @@ const Renderer = struct {
                 };
                 self.device.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
 
-                self.device.cmdDraw(command_buffer, 3, 1, 0, 0);
+                const descriptor_sets: [1]vk.DescriptorSet = .{
+                    self.descriptor_set,
+                };
+                self.device.cmdBindDescriptorSets(
+                    command_buffer,
+                    .graphics,
+                    self.pipeline_layout,
+                    0,
+                    descriptor_sets.len,
+                    &descriptor_sets,
+                    0,
+                    null,
+                );
+
+                self.device.cmdDraw(command_buffer, 6, 1, 0, 0);
             }
 
             const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
                 .{
                     .src_stage_mask = .{ .color_attachment_output_bit = true },
                     .src_access_mask = .{ .color_attachment_write_bit = true },
+                    .dst_stage_mask = .{},
+                    .dst_access_mask = .{},
                     .old_layout = .attachment_optimal,
                     .new_layout = .present_src_khr,
                     .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -706,11 +923,11 @@ const Renderer = struct {
 };
 
 const debug = std.debug;
-
 const vk = @import("vulkan");
+const c = @import("Renderer/vma.zig").c;
 extern "vulkan" fn vkGetInstanceProcAddr(instance: vk.Instance, name: [*:0]const u8) vk.PfnVoidFunction;
-const Atlas = @import("renderer/Atlas.zig");
+const Atlas = @import("Renderer/Atlas.zig");
 
 comptime {
-    std.testing.refAllDeclsRecursive(@import("renderer/Atlas.zig"));
+    std.testing.refAllDeclsRecursive(@import("Renderer/Atlas.zig"));
 }
