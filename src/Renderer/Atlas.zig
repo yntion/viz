@@ -9,7 +9,7 @@ mapping: []u8,
 
 pub fn init(vma: c.VmaAllocator, power: u4) !Atlas {
     const side = @as(u16, 1) << power;
-    const size = side << power;
+    const size = @as(u32, side) << power;
 
     var buffer: vk.Buffer = undefined;
     var buffer_allocation: c.VmaAllocation = undefined;
@@ -25,7 +25,7 @@ pub fn init(vma: c.VmaAllocator, power: u4) !Atlas {
         vma,
         @ptrCast(&buffer_info),
         &.{
-            .flags = c.VMA_ALLOCATION_CREATE_MAPPED_BIT | c.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+            .flags = c.VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT | c.VMA_ALLOCATION_CREATE_MAPPED_BIT | c.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
             .usage = c.VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
         },
         @ptrCast(&buffer),
@@ -151,13 +151,26 @@ fn deinit(self: Atlas) void {
     _ = self;
 }
 
-pub fn insert(self: *Atlas, bitmap: []const u8, width: u32, height: u32) !struct { f32, f32 } {
-    debug.assert(width <= self.width - self.row_extent);
+pub fn insert(self: *Atlas, bitmap: []const u8, width: u32, height: u32, pitch: u32) !struct { f32, f32 } {
+    debug.assert(bitmap.len == height * pitch);
+    debug.assert(self.width == self.height);
+
+    if (width > self.width - self.row_extent) {
+        self.row_extent = 0;
+        self.row_baseline += self.row_height;
+        self.row_height = 0;
+    }
+
     debug.assert(height <= self.height - self.row_baseline);
+    debug.assert(width <= self.width - self.row_extent);
+
+    const side: f32 = @floatFromInt(self.width);
+    const u = @as(f32, @floatFromInt(self.row_baseline)) / side;
+    const v = @as(f32, @floatFromInt(self.row_extent)) / side;
 
     for (0..height) |y| {
-        const dst = self.mapping[(self.row_baseline + y) * self.width..][0..width];
-        const src = bitmap[y * width..][0..width];
+        const dst = self.mapping[(self.row_baseline + y) * self.width + self.row_extent..][0..width];
+        const src = bitmap[y * pitch..][0..width];
 
         @memcpy(dst, src);
     }
@@ -165,7 +178,7 @@ pub fn insert(self: *Atlas, bitmap: []const u8, width: u32, height: u32) !struct
     if (height > self.row_height) self.row_height = height;
     self.row_extent += width;
 
-    return .{ 0, 0 };
+    return .{ u, v };
 }
 
 test {

@@ -41,10 +41,16 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = true,
     });
 
-    viz.addIncludePath(b.path("thirdparty/vma"));
+    const freetype = b.dependency("mach_freetype", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    viz.addImport("freetype", freetype.module("mach-freetype"));
+    viz.linkSystemLibrary("freetype", .{});
 
+    viz.addIncludePath(b.path("thirdparty/vma"));
     viz.addCSourceFile(.{
-        .file = b.path("src/Renderer/vma_implementation.cpp"),
+        .file = b.path("src/Renderer/vma.cpp"),
     });
 
     const scanner = @import("zig_wayland").Scanner.create(b, .{});

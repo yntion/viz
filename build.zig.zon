@@ -44,6 +44,10 @@
             .url = "git+https://github.com/snektron/vulkan-zig#9b4090c852760ce3210562f62ffaf301479c38ba",
             .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
         },
+        .mach_freetype = .{
+            .url = "git+https://github.com/yntion/mach-freetype#a431a1d1704b44ae9f5b41a77d6bcadd937acd09",
+            .hash = "mach_freetype-0.0.0-AAAAAINcAQCYeFuX_FxRTOEuBwKLT48jUPXsvPALmsPc",
+        },
     },
     .paths = .{
         "build.zig",

@@ -63,6 +63,30 @@ pub fn main() !void {
     toplevel.setListener(*XdgSurfaceState, toplevelListener, &state);
     xdg_surface.setListener(*XdgSurfaceState, xdgSurfaceListener, &state);
 
+    const lib: @import("freetype").Library = try .init();
+    defer lib.deinit();
+
+    const face = try lib.createFace("/usr/share/fonts/noto/NotoSansMono-Regular.ttf", 0);
+    defer face.deinit();
+
+    const font_size = 11.25;
+    try face.setCharSize(@round((1 << 6) * font_size * 1.25), 0, 0, 0);
+
+    const global_metrics = face.size().metrics();
+    debug.print("face size metrics: {}\n", .{global_metrics});
+
+    const cell_width: u32 = blk: {
+        try face.loadChar('e', .{});
+        const glyph = face.glyph();
+        const metrics = glyph.metrics();
+        debug.print("glyph metrics: {}\n", .{metrics});
+        debug.assert(glyph.advance().x == metrics.horiAdvance);
+
+        break :blk @intCast(metrics.horiAdvance);
+    };
+    const cell_height: u32 = @intCast(global_metrics.height >> 6);
+    const ascender: u32 = @intCast(global_metrics.ascender >> 6);
+
     while (true) {
         if (display.dispatch() != .SUCCESS) return error.DispatchFailed;
 
@@ -71,9 +95,37 @@ pub fn main() !void {
 
             try renderer.resize(gpa, state.width, state.height);
 
-            debug.print("rendered aaaaaaaaaaaaaaaaa\n", .{});
+            const row = 0;
+            for (renderer.cells.items, "abcdefghij", 0..) |*cell, b, col| {
+                try face.loadChar(b, .{
+                    .render = true,
+                });
+
+                const glyph = face.glyph();
+                debug.assert(glyph.format() == .bitmap);
+
+                debug.print("glyph advance: {}\n", .{glyph.advance()});
+
+                const bitmap = glyph.bitmap();
+                debug.assert(bitmap.pixelMode() == .gray);
+                debug.print("glyph bitmap: {}\n", .{bitmap});
+
+                const glyph_x: u32 = @intCast(col * cell_width + @as(usize, @intCast(glyph.bitmapLeft())));
+                const glyph_y: u32 = @intCast(row * cell_height + ascender - @as(usize, @intCast(glyph.bitmapTop())));
+                const pitch: u32 = @intCast(bitmap.pitch());
+                const uv = try renderer.atlas.insert(bitmap.buffer().?, bitmap.width(), bitmap.rows(), pitch);
+
+                cell.* = .{
+                    .position = .{ glyph_x, glyph_y },
+                    .uv = uv,
+                    .width = bitmap.width(),
+                    .height = bitmap.rows(),
+                };
+            }
 
             try renderer.render(state.width, state.height);
+
+            debug.print("rendered aaaaaaaaaaaaaaaaa\n", .{});
         }
     }
 }
@@ -227,12 +279,20 @@ const Renderer = struct {
     queue: vk.Queue,
     surface: vk.SurfaceKHR,
     frame: Frame,
+    transform: PushConstant.Transform,
+    cells: Cells,
     descriptor_set: vk.DescriptorSet,
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
     swapchain: vk.SwapchainKHR,
     images: std.ArrayListUnmanaged(vk.Image),
     views: std.ArrayListUnmanaged(vk.ImageView),
+
+    const Cells = struct {
+        buffer: vk.Buffer,
+        allocation: c.VmaAllocation,
+        items: []Cell,
+    };
 
     const Frame = struct {
         command_pool: vk.CommandPool,
@@ -279,6 +339,18 @@ const Renderer = struct {
         }
     };
 
+    const PushConstant = extern struct {
+        transform: Transform,
+        atlas_side: f32,
+
+        const Transform = extern struct {
+            scale_x: f32,
+            translate_x: f32,
+            scale_y: f32,
+            translate_y: f32,
+        };
+    };
+
     const format: vk.Format = .b8g8r8a8_srgb;
     const subresource_range: vk.ImageSubresourceRange = .{
         .aspect_mask = .{ .color_bit = true },
@@ -309,7 +381,7 @@ const Renderer = struct {
         debug.print("vmaCreateAllocator: {}\n", .{@as(vk.Result, @enumFromInt(res))});
         errdefer c.vmaDestroyAllocator(vma);
 
-        const atlas: Atlas = try .init(vma, 5);
+        const atlas: Atlas = try .init(vma, 10);
         const atlas_image_view = try device.createImageView(&.{
             .image = atlas.image,
             .view_type = .@"2d",
@@ -356,6 +428,42 @@ const Renderer = struct {
         debug.assert(instance.getPhysicalDeviceWaylandPresentationSupportKHR(physical_device, queue_family, @ptrCast(display)) > 0);
 
         const queue = device.getDeviceQueue(queue_family, 0);
+
+        const transform: PushConstant.Transform = .{
+            .scale_x = 1,
+            .translate_x = 0,
+            .scale_y = 1,
+            .translate_y = 0,
+        };
+
+        const cells: Cells = cells: {
+            const buffer_info: vk.BufferCreateInfo = .{
+                .size = 10 * @sizeOf(Cell),
+                .usage = .{ .storage_buffer_bit = true },
+                .sharing_mode = .exclusive,
+            };
+            const allocation_create_info: c.VmaAllocationCreateInfo = .{
+                .flags = c.VMA_ALLOCATION_CREATE_MAPPED_BIT | c.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                .usage = c.VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            };
+            var buffer: vk.Buffer = undefined;
+            var allocation: c.VmaAllocation = undefined;
+            var allocation_info: c.VmaAllocationInfo = undefined;
+            debug.assert(c.vmaCreateBuffer(
+                vma,
+                @ptrCast(&buffer_info),
+                &allocation_create_info,
+                @ptrCast(&buffer),
+                &allocation,
+                &allocation_info,
+            ) >= 0);
+            const items: []Cell = @as([*]Cell, @alignCast(@ptrCast(allocation_info.pMappedData.?)))[0..10];
+            break :cells .{
+                .buffer = buffer,
+                .allocation = allocation,
+                .items = items,
+            };
+        };
 
         const descriptor_set_layout, const descriptor_set, const pipeline_layout, const pipeline = pipeline: {
             const attachment_formats: [1]vk.Format = .{format};
@@ -420,7 +528,7 @@ const Renderer = struct {
                 .rasterizer_discard_enable = vk.FALSE,
                 .polygon_mode = .fill,
                 .line_width = 1,
-                .front_face = .counter_clockwise,
+                .front_face = .clockwise,
                 .depth_bias_enable = vk.FALSE,
                 .depth_bias_constant_factor = 0,
                 .depth_bias_clamp = 0,
@@ -460,9 +568,15 @@ const Renderer = struct {
                 .blend_constants = .{ 0, 0, 0, 0 },
             };
 
-            const bindings: [1]vk.DescriptorSetLayoutBinding = .{
+            const bindings: [2]vk.DescriptorSetLayoutBinding = .{
                 .{
                     .binding = 0,
+                    .descriptor_type = .storage_buffer,
+                    .descriptor_count = 1,
+                    .stage_flags = .{ .vertex_bit = true },
+                },
+                .{
+                    .binding = 1,
                     .descriptor_type = .combined_image_sampler,
                     .descriptor_count = 1,
                     .stage_flags = .{ .fragment_bit = true },
@@ -480,7 +594,11 @@ const Renderer = struct {
             errdefer device.destroyDescriptorSetLayout(descriptor_set_layouts[0], null);
 
             const descriptor_pool = blk: {
-                const sizes: [1]vk.DescriptorPoolSize = .{
+                const sizes: [2]vk.DescriptorPoolSize = .{
+                    .{
+                        .type = .storage_buffer,
+                        .descriptor_count = 1,
+                    },
                     .{
                         .type = .combined_image_sampler,
                         .descriptor_count = 1,
@@ -501,34 +619,55 @@ const Renderer = struct {
             var descriptor_sets: [1]vk.DescriptorSet = undefined;
             try device.allocateDescriptorSets(&.{
                 .descriptor_pool = descriptor_pool,
-                .descriptor_set_count = descriptor_set_layouts.len,
+                .descriptor_set_count = descriptor_sets.len,
                 .p_set_layouts = &descriptor_set_layouts,
             }, &descriptor_sets);
 
-            const descriptor_writes: [1]vk.WriteDescriptorSet = .{
-                .{
-                    .dst_set = descriptor_sets[0],
-                    .dst_binding = 0,
-                    .dst_array_element = 0,
-                    .descriptor_count = 1,
-                    .descriptor_type = .combined_image_sampler,
-                    .p_image_info = &.{
-                        .{
-                            .sampler = sampler,
-                            .image_view = atlas_image_view,
-                            .image_layout = .shader_read_only_optimal,
-                        },
+            const descriptor_writes: [2]vk.WriteDescriptorSet = .{ .{
+                .dst_set = descriptor_sets[0],
+                .dst_binding = 1,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .combined_image_sampler,
+                .p_image_info = &.{
+                    .{
+                        .sampler = sampler,
+                        .image_view = atlas_image_view,
+                        .image_layout = .shader_read_only_optimal,
                     },
-                    .p_buffer_info = &.{},
-                    .p_texel_buffer_view = &.{},
+                },
+                .p_buffer_info = &.{},
+                .p_texel_buffer_view = &.{},
+            }, .{
+                .dst_set = descriptor_sets[0],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .storage_buffer,
+                .p_image_info = &.{},
+                .p_buffer_info = &.{.{
+                    .buffer = cells.buffer,
+                    .offset = 0,
+                    .range = cells.items.len * @sizeOf(Cell),
+                }},
+                .p_texel_buffer_view = &.{},
+            } };
+            device.updateDescriptorSets(descriptor_writes.len, &descriptor_writes, 0, null);
+
+            const push_constant_ranges: [1]vk.PushConstantRange = .{
+                .{
+                    .stage_flags = .{ .vertex_bit = true },
+                    .offset = 0,
+                    .size = @sizeOf(PushConstant),
                 },
             };
-            device.updateDescriptorSets(descriptor_writes.len, &descriptor_writes, 0, null);
 
             const pipeline_layout = try device.createPipelineLayout(
                 &.{
                     .set_layout_count = descriptor_set_layouts.len,
                     .p_set_layouts = &descriptor_set_layouts,
+                    .push_constant_range_count = push_constant_ranges.len,
+                    .p_push_constant_ranges = &push_constant_ranges,
                 },
                 null,
             );
@@ -570,6 +709,8 @@ const Renderer = struct {
             .queue = queue,
             .surface = surface,
             .frame = frame,
+            .transform = transform,
+            .cells = cells,
             .descriptor_set = descriptor_set,
             .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
@@ -672,6 +813,13 @@ const Renderer = struct {
 
         debug.assert(self.views.items.len == self.images.items.len);
 
+        self.transform = .{
+            .scale_x = 2 / @as(f32, @floatFromInt(width)),
+            .translate_x = -1,
+            .scale_y = -2 / @as(f32, @floatFromInt(height)),
+            .translate_y = 1,
+        };
+
         self.swapchain = swapchain;
     }
 
@@ -681,8 +829,6 @@ const Renderer = struct {
 
         const image_index = (try self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.frame.image_acquired, .null_handle)).image_index;
         const command_buffer = self.frame.command_buffer;
-
-        _ = try self.atlas.insert(&[_]u8{0x7f} ** (8 * 8), 8, 8);
 
         {
             try self.device.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
@@ -793,7 +939,7 @@ const Renderer = struct {
                         .load_op = .clear,
                         .store_op = .store,
                         .clear_value = .{
-                            .color = .{ .float_32 = .{ 0.2, 0, 0.3, 0 } },
+                            .color = .{ .float_32 = .{ 0, 0, 0, 0} },
                         },
                     },
                 };
@@ -851,7 +997,23 @@ const Renderer = struct {
                     null,
                 );
 
-                self.device.cmdDraw(command_buffer, 6, 1, 0, 0);
+                const push_constant = mem.asBytes(&@as(
+                    PushConstant,
+                    .{
+                        .transform = self.transform,
+                        .atlas_side = @floatFromInt(self.atlas.width),
+                    },
+                ));
+                self.device.cmdPushConstants(
+                    command_buffer,
+                    self.pipeline_layout,
+                    .{ .vertex_bit = true },
+                    0,
+                    push_constant.len,
+                    push_constant,
+                );
+
+                self.device.cmdDraw(command_buffer, @intCast(self.cells.items.len * 6), 1, 0, 0);
             }
 
             const image_barriers: [1]vk.ImageMemoryBarrier2 = .{
@@ -920,6 +1082,13 @@ const Renderer = struct {
         _ = try self.device.waitForFences(fences.len, &fences, vk.TRUE, std.math.maxInt(u64));
         try self.device.resetFences(fences.len, &fences);
     }
+
+    const Cell = extern struct {
+        position: @Vector(2, u32),
+        uv: @Vector(2, f32),
+        width: u32,
+        height: u32,
+    };
 };
 
 const debug = std.debug;
