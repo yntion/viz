@@ -1,4 +1,11 @@
 pub fn main() !void {
+    var statek: State = .{};
+
+    var kek: Platform = try .init(&statek);
+    const window = try kek.getWindow(100, 200);
+    _ = window;
+    try kek.dispatch();
+
     const display = try wl.Display.connect(null);
     defer display.disconnect();
 
@@ -182,6 +189,15 @@ fn xdgSurfaceListener(surface: *xdg.Surface, event: xdg.Surface.Event, state: *X
     }
 }
 
+const State = struct {
+    pub fn handler(self: *State, configure: Platform.Configure) void {
+        _ = self;
+        _ = configure;
+    }
+};
+
+const Platform = @import("platform.zig").Platform(State);
+
 const XdgSurfaceState = struct {
     configure: struct {
         flags: Flags,
@@ -250,8 +266,8 @@ fn setupDevice(gpa: mem.Allocator, instance: vk.InstanceProxy) !struct { vk.Phys
     const device_handle = blk: {
         const device_extensions: [1][*:0]const u8 = .{vk.extensions.khr_swapchain.name};
         const features: vk.PhysicalDeviceVulkan13Features = .{
-            .synchronization_2 = vk.TRUE,
-            .dynamic_rendering = vk.TRUE,
+            .synchronization_2 = .true,
+            .dynamic_rendering = .true,
         };
 
         break :blk try instance.createDevice(physical_device, &.{
@@ -261,7 +277,7 @@ fn setupDevice(gpa: mem.Allocator, instance: vk.InstanceProxy) !struct { vk.Phys
             .enabled_extension_count = device_extensions.len,
             .pp_enabled_extension_names = &device_extensions,
             .p_enabled_features = &.{
-                .sampler_anisotropy = vk.TRUE,
+                .sampler_anisotropy = .true,
             },
         }, null);
     };
@@ -404,14 +420,14 @@ const Renderer = struct {
             .address_mode_v = .repeat,
             .address_mode_w = .repeat,
             .mip_lod_bias = 0,
-            .anisotropy_enable = vk.TRUE,
+            .anisotropy_enable = .true,
             .max_anisotropy = physical_device_properties.limits.max_sampler_anisotropy,
-            .compare_enable = vk.FALSE,
+            .compare_enable = .false,
             .compare_op = .never,
             .min_lod = 0,
             .max_lod = 0,
             .border_color = .int_opaque_black,
-            .unnormalized_coordinates = vk.FALSE,
+            .unnormalized_coordinates = .false,
         }, null);
         errdefer device.destroySampler(sampler, null);
 
@@ -425,7 +441,7 @@ const Renderer = struct {
         const frame: Frame = try .init(device, queue_family);
         errdefer frame.deinit(device);
 
-        debug.assert(instance.getPhysicalDeviceWaylandPresentationSupportKHR(physical_device, queue_family, @ptrCast(display)) > 0);
+        debug.assert(@intFromEnum(instance.getPhysicalDeviceWaylandPresentationSupportKHR(physical_device, queue_family, @ptrCast(display))) > 0);
 
         const queue = device.getDeviceQueue(queue_family, 0);
 
@@ -515,7 +531,7 @@ const Renderer = struct {
 
             const input_assembly: vk.PipelineInputAssemblyStateCreateInfo = .{
                 .topology = .triangle_list,
-                .primitive_restart_enable = vk.FALSE,
+                .primitive_restart_enable = .false,
             };
 
             const viewport: vk.PipelineViewportStateCreateInfo = .{
@@ -524,12 +540,12 @@ const Renderer = struct {
             };
 
             const rasterization: vk.PipelineRasterizationStateCreateInfo = .{
-                .depth_clamp_enable = vk.FALSE,
-                .rasterizer_discard_enable = vk.FALSE,
+                .depth_clamp_enable = .false,
+                .rasterizer_discard_enable = .false,
                 .polygon_mode = .fill,
                 .line_width = 1,
                 .front_face = .clockwise,
-                .depth_bias_enable = vk.FALSE,
+                .depth_bias_enable = .false,
                 .depth_bias_constant_factor = 0,
                 .depth_bias_clamp = 0,
                 .depth_bias_slope_factor = 0,
@@ -537,15 +553,15 @@ const Renderer = struct {
 
             const multisample: vk.PipelineMultisampleStateCreateInfo = .{
                 .rasterization_samples = .{ .@"1_bit" = true },
-                .sample_shading_enable = vk.FALSE,
+                .sample_shading_enable = .false,
                 .min_sample_shading = 0,
-                .alpha_to_coverage_enable = vk.FALSE,
-                .alpha_to_one_enable = vk.FALSE,
+                .alpha_to_coverage_enable = .false,
+                .alpha_to_one_enable = .false,
             };
 
             const attachments: [1]vk.PipelineColorBlendAttachmentState = .{
                 .{
-                    .blend_enable = vk.FALSE,
+                    .blend_enable = .false,
                     .src_color_blend_factor = .zero,
                     .dst_color_blend_factor = .zero,
                     .color_blend_op = .add,
@@ -561,7 +577,7 @@ const Renderer = struct {
                 },
             };
             const color_blend: vk.PipelineColorBlendStateCreateInfo = .{
-                .logic_op_enable = vk.FALSE,
+                .logic_op_enable = .false,
                 .logic_op = .copy,
                 .attachment_count = attachments.len,
                 .p_attachments = &attachments,
@@ -779,7 +795,7 @@ const Renderer = struct {
             .pre_transform = capabilities.current_transform,
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = .mailbox_khr,
-            .clipped = vk.TRUE,
+            .clipped = .true,
             .old_swapchain = self.swapchain,
         }, null);
         errdefer self.device.destroySwapchainKHR(swapchain, null);
@@ -1079,7 +1095,7 @@ const Renderer = struct {
         });
 
         const fences: [1]vk.Fence = .{self.frame.rendered};
-        _ = try self.device.waitForFences(fences.len, &fences, vk.TRUE, std.math.maxInt(u64));
+        _ = try self.device.waitForFences(fences.len, &fences, .true, std.math.maxInt(u64));
         try self.device.resetFences(fences.len, &fences);
     }
 

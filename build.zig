@@ -46,14 +46,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     viz.addImport("freetype", freetype.module("mach-freetype"));
-    viz.linkSystemLibrary("freetype", .{});
+    //viz.linkSystemLibrary("freetype", .{});
 
-    viz.addIncludePath(b.path("thirdparty/vma"));
+    viz.addIncludePath(b.path("vma/include"));
     viz.addCSourceFile(.{
         .file = b.path("src/Renderer/vma.cpp"),
     });
 
-    const scanner = @import("zig_wayland").Scanner.create(b, .{});
+    const scanner = @import("wayland").Scanner.create(b, .{});
     const wayland = b.createModule(.{
         .root_source_file = scanner.result,
     });
@@ -65,7 +65,11 @@ pub fn build(b: *std.Build) void {
     viz.addImport("wayland", wayland);
     viz.linkSystemLibrary("wayland-client", .{});
 
+    viz.linkSystemLibrary("xcb", .{});
+
     const vulkan = b.dependency("vulkan", .{
+        .target = target,
+        .optimize = optimize,
         .registry = @as(std.Build.LazyPath, .{ .cwd_relative = "/usr/share/vulkan/registry/vk.xml" }),
     }).module("vulkan-zig");
     viz.addImport("vulkan", vulkan);

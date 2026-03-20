@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -36,17 +36,17 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .zig_wayland = .{
-            .url = "git+https://codeberg.org/ifreund/zig-wayland#91dcb18041e92fb73d0c09c6b7416c24d5295923",
-            .hash = "zig_wayland-0.3.0-dev-r73zYTzIAQAOXkH-9fjwrtXiGA7nDbOOkm-a_WcnQbQE",
-        },
         .vulkan = .{
-            .url = "git+https://github.com/snektron/vulkan-zig#9b4090c852760ce3210562f62ffaf301479c38ba",
-            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
+            .url = "git+https://github.com/Snektron/vulkan-zig?ref=zig-0.15-compat#f879074293f0e2f718c93fd19cc0a96260a3aa52",
+            .hash = "vulkan-0.0.0-r7Ytx6hBAwBUnt0XA-uOkR2hda4fAHFhQITNTgJpnFkY",
         },
         .mach_freetype = .{
-            .url = "git+https://github.com/yntion/mach-freetype#a431a1d1704b44ae9f5b41a77d6bcadd937acd09",
-            .hash = "mach_freetype-0.0.0-AAAAAINcAQCYeFuX_FxRTOEuBwKLT48jUPXsvPALmsPc",
+            .url = "mach-freetype/",
+            .hash = "mach_freetype-0.0.0-c6mlv4VcAQBmIzoiYKSWCnnZ2idC7lPbyA0tNBczYdbx",
+        },
+        .wayland = .{
+            .url = "git+https://codeberg.org/ifreund/zig-wayland#1b5c038ec10da20ed3a15b0b2a6db1c21383e8ea",
+            .hash = "wayland-0.5.0-dev-lQa1khrMAQDJDwYFKpdH3HizherB7sHo5dKMECfvxQHe",
         },
     },
     .paths = .{
